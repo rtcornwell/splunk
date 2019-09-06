@@ -2,21 +2,22 @@
 # -*- coding:utf-8 -*-
 import sys
 import time
-import urllib
 import os
-from obs import *
+from com.obs.client.obs_client import ObsClient
 import gzip
 from cStringIO import StringIO
-import urlparse
 import xml.dom.minidom
 import xml.sax.saxutils
 import logging
 import requests
 import json
 from __builtin__ import Exception
+import subprocess
 import re
 from urllib import quote
 from requests.cookies import merge_cookies
+import urlparse
+import urllib
 
 # set up logging suitable for splunkd consumption
 logging.root
@@ -28,33 +29,40 @@ logging.root.addHandler(handler)
 
 # Setup the Scheme used for the Splunk Web Application Interface
 SCHEME = """<scheme>
-    <title>OTC Log Processing with IdP SSO support</title>
-    <description>Retrieve Open Telekom Cloud Logs from OBS</description>
+    <title>OTC Cloud Trace Log Processing with IdP Azure AD Authentication support</title>
+    <description>Retrieve Open Telekom Cloud Logs from OBS, Authenticate with Federated Accounts</description>
     <use_external_validation>true</use_external_validation>
     <streaming_mode>xml</streaming_mode>
-
     <endpoint>
         <args>
             <arg name="name">
                 <title>Instance Name</title>
                 <description>Provide a unique name for this Instance/Stanza. IE: Cloudtrace, VPCFlow</description>
             </arg>
-
+            <arg name="endpoint">
+                <title>OBS Endpoint</title>
+                <description>Enter the Url for the OBS endpoint.</description>
+            </arg>
             <arg name="bucketname">
                 <title>Bucketname</title>
-                <description>Enter the name of the Bucket on OBS soring the log traces.</description>
+                <description>Enter the name of the Bucket on OBS configure in CTS Traker.</description>
             </arg>
-
+            <arg name="prefix">
+                <title>CTS Prefix</title>
+                <description>Enter the Prefix used in the CTS Traker</description>
+            </arg>
+            <arg name="maxkeys">
+                <title>Max Keys</title>
+                <description>Enter the Max Keys parameter (10-1000). This is a tuning parameter for OBS Client</description>
+            </arg>
             <arg name="idpname">
-                <title>IdP Name</title>
-                <description>The name of the OTC Identity Provider Definition</description>
+                <title>IDP Name</title>
+                <description>Enter the name of the IDP Federated configuration to authenticate against</description>
             </arg>
-
             <arg name="username">
                 <title>User Name</title>
                 <description>Azure AD or Other user accounts</description>
             </arg>
-
             <arg name="userpass">
                 <title>User password</title>
                 <description>Azure AD or Other user accounts password</description>
@@ -173,15 +181,18 @@ def get_token(IAMurl, UserName, UserPass):
 # Function to request temporary AK/SK and security key https://docs.otc.t-systems.com/en-us/api/iam/en-us_topic_0097949518.html
 def get_ak(TokenID):
     url = "https://iam.eu-de.otc.t-systems.com/v3.0/OS-CREDENTIAL/securitytokens"
-    body = "{\"auth\":{\"identity\":{\"methods\":[\"token\"],\"token\":{\"id\":\"" + TokenID + "\",\"duration-seconds\":\"900\"}}}}"
+    body = '{\"auth\":{\"identity\":{\"methods\": [\"token\"],\"token\":{\"id\": \"'+ TokenID +'\",\"duration-seconds\": \"900\"}}}}'
     Header = dict()
-    Header.setdefault("X-Auth-Token", TokenID)
     Header.setdefault("Content-type", "application/json;charset=utf8")
-    resp = http_post(url, Header, body)
-    data = json.loads(resp.text)
-    ak = data["credential"]["access"]
-    sk = data["credential"]["secret"]
-    st = data["credential"]["securitytoken"]
+    resp = requests.request('post', url, data=body, headers=Header, verify=False, cert=None, proxies=None, cookies=None, allow_redirects=False, timeout=600)
+    if resp.status_code!= 201:
+            logging.debug("get_ak: Error Retrievinbg Temp AK/SK: , errorCode:%s" % resp.status_code)
+            sys.exit(2)
+    else: 
+        data = json.loads(resp.text)
+        ak = data["credential"]["access"]
+        sk = data["credential"]["secret"]
+        st = data["credential"]["securitytoken"]
     return (ak, sk, st)
 
 def init_stream():
@@ -210,15 +221,18 @@ def read_gz_file(buffer):
 
 # Connect to OBS and Query all the objects in the Bucket to be processed. 
 # Prefix and marker limit the search. Marker is a checkpoint of last run.
-def processlogs(bucketClient, prefix=None, marker=None, max_keys=None, source=None):
-    resp_list = bucketClient.listObjects(prefix=prefix, marker=marker, max_keys=max_keys, delimiter=None)
+def processlogs(obsClient, BucketName, prefix=None, marker=None, max_keys=None, source=None):
+    
+    resp_list = obsClient.listObjects(BucketName, marker=marker, max_keys=max_keys,prefix=prefix)
     if resp_list.status < 300:
+        logging.info("ProcessLogs: Successfully Retrieved Bucket Objects code: %s" , resp_list.status)
+        print resp_list.body
         if resp_list.body:
             if resp_list.body.contents:
                 i = 0
                 for content in resp_list.body.contents:
-                    resp_get = bucketClient.getObject(content.key, loadStreamInMemory=True)
-                    if resp_get.status < 300:
+                    resp_get = obsClient.getObject(BucketName,content.key, loadStreamInMemory=True)
+                    if resp_get.status < 300 :
                         init_stream()
                         StreamData = read_gz_file(resp_get.body.buffer)
                         # Parse individual events from json Data (trace events) and send event to splunk indexer.
@@ -231,13 +245,20 @@ def processlogs(bucketClient, prefix=None, marker=None, max_keys=None, source=No
                             Event['record_time'] = int(round(Event['record_time'] / 1000))
                             send_event(json.dumps(Event), Event['time'], source) 
                         fini_stream()
+                    else:
+                            logging.debug("ProcessLogs: Error Accessing file: "+content.key+" Errocode: %s" , resp_get.returncode)
+                            sys.exit(2)
                     i += 1
                     sys.stdout.flush()
+                    
                 return content.key, resp_list.body.next_marker
-        return marker, None
+            else:
+                return marker, None
+        else:
+            return marker, None
     else:
-        logging.debug('errorCode:%s', resp_list.errorCode)
-        logging.debug('errorMessage:%s', resp_list.errorMessage)
+        logging.debug("Processlogs: Error Accessing OBS Bucket " + BucketName + ",errorCode:%s", resp_list.status)
+        logging.debug('ProcessLogs: Error Message:%s', resp_list.errorMessage)
         sys.exit(2)
 
 # prints XML error data to be consumed by Splunk
@@ -289,7 +310,10 @@ def get_config(): # read XML configuration passed from splunkd
 
         # just some validation: make sure these keys are present (required)
         validate_conf(config, "name")
+        validate_conf(config, "endpoint")
         validate_conf(config, "bucketname")
+        validate_conf(config, "prefix")
+        validate_conf(config, "maxkeys")
         validate_conf(config, "idpname")
         validate_conf(config, "username")
         validate_conf(config, "userpass")
@@ -347,15 +371,17 @@ def run():
     # Read Parameters passed by Splunk Configuration
     config = get_config()
     Instance = config["name"]
+    Endpoint = config["endpoint"]
     BucketName = config["bucketname"]
-    IdPName = config["idpname"]
+    Prefix = config["prefix"]
+    MaxKeys = config["maxkeys"]
+    IdpName = config["idpname"]
     UserName = config["username"]
     UserPass = config["userpass"]
     
     # Build the Url for the OTC Federated Authentication. the IdPName is passed by the user in sysargs.
-    IAMurl = "https://iam.eu-de.otc.t-systems.com/v3/OS-FEDERATION/identity_providers/" + IdPName + "/protocols/saml/auth"
-    OBSurl = "obs.eu-de.otc.t-systems.com"
-
+    IAMurl = "https://iam.eu-de.otc.t-systems.com/v3/OS-FEDERATION/identity_providers/" + IdpName + "/protocols/saml/auth"
+    
     # Setup Checkpoint file name based on Instance name. We ae parsing the name passed by Splunk
     slist = Instance.split("//")
     InstanceName = slist[1]
@@ -373,7 +399,7 @@ def run():
 
     # Constructs a obs client instance with your account for accessing OBS
     # https://docs.otc.t-systems.com/en-us/sdk_python_api/obs/en-us_topic_0080493206.html
-    obsClient = ObsClient(access_key_id=AK, secret_access_key=SK, security_token=TokenID,server=OBSurl, proxy_host=ProxyHost, proxy_port=ProxyPort)
+    obsClient = ObsClient(access_key_id=AK, secret_access_key=SK, security_token=TokenID,server=Endpoint, proxy_host=ProxyHost, proxy_port=ProxyPort)
     bucketClient = obsClient.bucketClient(BucketName) # Initialize the OBS Client
 
     #Max Key tells the obsclient how many objects to return in the list of each cycle. Can be set from 1-1000. 
