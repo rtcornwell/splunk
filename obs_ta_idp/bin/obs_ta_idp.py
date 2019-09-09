@@ -72,7 +72,7 @@ SCHEME = """<scheme>
 </scheme>
 """
 
-def http_request(IAMurl, method, header, body=None, request_verify=False, request_cert=None, proxies=None, cookies=None):
+def http_request(IAMurl, method, header, body=None, request_verify=True, request_cert=None, proxies=None, cookies=None):
     if body != None and type(body) != str:
         body = str(body)
 
@@ -89,12 +89,12 @@ def http_request(IAMurl, method, header, body=None, request_verify=False, reques
     resp = requests.request(method, IAMurl, data=body, headers=header, verify=request_verify, cert=request_cert, proxies=proxies, cookies=cookies, allow_redirects=False, timeout=600)
     return resp
 
-def http_post(IAMurl, headers, data, verify=False, cert=None, proxies=None, cookies=None):
+def http_post(IAMurl, headers, data, verify=True, cert=None, proxies=None, cookies=None):
 
     response = http_request(IAMurl, "post", headers, body=data, request_verify=verify, request_cert=cert, proxies=proxies, cookies=cookies)
     return response
 
-def http_get(IAMurl, headers, verify=False, cert=None, proxies=None, cookies=None):
+def http_get(IAMurl, headers, verify=True, cert=None, proxies=None, cookies=None):
     
     response = http_request(IAMurl, "get", headers, request_verify=verify, request_cert=cert, proxies=proxies, cookies=cookies)
     return response
@@ -110,9 +110,12 @@ def get_token(IAMurl, UserName, UserPass):
 
     encodeUserName = quote(UserName)
     iamResult = http_get(IAMurl, None, proxies=proxies)
+    
     imaLocationUrl = iamResult.headers.get("Location")
     result = http_get(imaLocationUrl, None, proxies=proxies)
-
+    if result.status_code!= 200:
+        logging.debug("Error on First IamUrl Call: , errorCode:%s" % result.status_code)
+        sys.exit(2)
     responseHeader = result.headers
     UserNameGetUrl = result.request.url
     cookies = result.cookies
@@ -134,6 +137,9 @@ def get_token(IAMurl, UserName, UserPass):
         encodeUserName, microsoftMatchJson.get("sCtx"), microsoftMatchJson.get("sFT"))
 
     credentialResponse = http_post(getCredentialUrl, UserNamePostHeader, bodyGetCredentialType, proxies=proxies, cookies=result.cookies)
+    if credentialResponse.status_code!= 200:
+        logging.debug("Error on credential response: , errorCode:%s" % credentialResponse.status_code)
+        sys.exit(2)
     merge_cookies(cookies, credentialResponse.cookies)
 
     hpgRequestId = None
@@ -149,7 +155,7 @@ def get_token(IAMurl, UserName, UserPass):
     mircroRequestHeader.setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3")
     mircroRequestBody = "i13=0&login=%s&loginfmt=%s&type=11&LoginOptions=3&lrt=&lrtPartition=&hisRegion=&hisScaleUnit=&passwd=%s&ps=2&psRNGCDefaultType=&psRNGCEntropy=&psRNGCSLK=&canary=%s&ctx=%s&hpgrequestid=%s&flowToken=%s&PPSX=&NewUser=1&FoundMSAs=&fspost=0&i21=0&CookieDisclosure=0&IsFidoSupported=1&i2=1&i17=&i18=&i19=15193" % (
         encodeUserName, encodeUserName, quote(UserPass), quote(microsoftMatchJson.get("canary")), microsoftMatchJson.get("sCtx"), responseHeader.get("x-ms-request-id"), microsoftMatchJson.get("sFT"))
-    mircroResponse = http_post(microUrl+mircroUrlPost, mircroRequestHeader, mircroRequestBody, proxies=proxies, cookies=cookies)
+    mircroResponse = http_post(mircroUrlPost, mircroRequestHeader, mircroRequestBody, proxies=proxies, cookies=cookies)
     mircroResponseCompile = re.compile("//<!\\[CDATA\\[[\\s]+\\$Config=(.*);[\\s]+//\\]\\]>")
     mircroResponseMatcher = mircroResponseCompile.findall(mircroResponse.text)
     mircroResponseObject = json.loads(mircroResponseMatcher[0])
@@ -168,13 +174,22 @@ def get_token(IAMurl, UserName, UserPass):
     kmsiHeader.setdefault("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
 
     kmsiResponse = http_post("https://login.microsoftonline.com/kmsi", kmsiHeader, kmsiRequestBody, proxies=proxies, cookies=kmsiRequestCookies)
+    if kmsiResponse.status_code!= 302:
+        logging.debug("Error in KMSI Response: , errorCode:%s" % kmsiResponse.status_code)
+        sys.exit(2)
+    print kmsiResponse.text
     sAMLResponseCompile = re.compile("name=\"SAMLResponse\"[\\s]+value=\"([\S]*)\"")
     relayStateCompile = re.compile("name=\"RelayState\"[\\s]+value=\"([\S]*)\"")
     sAMLResponse = sAMLResponseCompile.findall(kmsiResponse.text)[0]
     relayState = relayStateCompile.findall(kmsiResponse.text)[0]
     iamPostResponse = http_post("https://iam.eu-de.otc.t-systems.com/v3-ext/auth/OS-FEDERATION/SSO/SAML2/POST", kmsiHeader, "SAMLResponse=%s&RelayState=%s" % (quote(sAMLResponse), relayState), proxies=proxies)
-
+    if iamPostResponse.status_code!= 201:
+        logging.debug("Error in KMSI Response: , errorCode:%s" % iamPostResponse.status_code)
+        sys.exit(2)
     iamPostLocationResponse = http_get(iamPostResponse.headers.get("Location"), None, proxies=proxies, cookies=iamPostResponse.cookies)
+    if iamPostLocationResponse.status_code!= 201:
+        logging.debug("Error in KMSI Response: , errorCode:%s" % iamPostLocationResponse.status_code)
+        sys.exit(2)
     TokenID = iamPostLocationResponse.headers.get("X-Subject-Token")
     return TokenID
 
@@ -186,14 +201,14 @@ def get_ak(TokenID):
     Header.setdefault("Content-type", "application/json;charset=utf8")
     resp = requests.request('post', url, data=body, headers=Header, verify=False, cert=None, proxies=None, cookies=None, allow_redirects=False, timeout=600)
     if resp.status_code!= 201:
-            logging.debug("get_ak: Error Retrievinbg Temp AK/SK: , errorCode:%s" % resp.status_code)
-            sys.exit(2)
+        logging.debug("get_ak: Error Retrievinbg Temp AK/SK: , errorCode:%s" % resp.status_code)
+        sys.exit(2)
     else: 
         data = json.loads(resp.text)
         ak = data["credential"]["access"]
         sk = data["credential"]["secret"]
         st = data["credential"]["securitytoken"]
-    return (ak, sk, st)
+    return (ak, sk, st, resp.status_code)
 
 def init_stream():
     sys.stdout.write("<stream>")
@@ -368,29 +383,40 @@ def test():
     sys.exit(0)
 
 def run():
+
+    ProxyHost = None
+    ProxyPort = None
+    Prefix = None
+    MaxKeys = 100
     # Read Parameters passed by Splunk Configuration
-    config = get_config()
-    Instance = config["name"]
-    Endpoint = config["endpoint"]
-    BucketName = config["bucketname"]
-    Prefix = config["prefix"]
-    MaxKeys = config["maxkeys"]
-    IdpName = config["idpname"]
-    UserName = config["username"]
-    UserPass = config["userpass"]
-    
+    # config = get_config()
+    # Instance = config["name"]
+    # Endpoint = config["endpoint"]
+    # BucketName = config["bucketname"]
+    # Prefix = config["prefix"]
+    # MaxKeys = config["maxkeys"]
+    # IdpName = config["idpname"]
+    # UserName = config["username"]
+    # UserPass = config["userpass"]
+    # Checkpoint_Dir = config["checkpoint_dir"]
+   
+    Instance = "obs_ta_idp//Cloudtrace"
+    Endpoint = "obs.eu-de.t-systems.com"
+    BucketName = "obs-robert"
+    Prefix = "CTS"
+    MaxKeys = 100
+    IdpName = "IdP-Azure-Federation"
+    UserName = "rtcornwell@outlook.com"
+    UserPass = "Moo1-Uuu7-elate"
+    Checkpoint_Dir = "C:\Users\rtcor"    
     # Build the Url for the OTC Federated Authentication. the IdPName is passed by the user in sysargs.
     IAMurl = "https://iam.eu-de.otc.t-systems.com/v3/OS-FEDERATION/identity_providers/" + IdpName + "/protocols/saml/auth"
     
     # Setup Checkpoint file name based on Instance name. We ae parsing the name passed by Splunk
     slist = Instance.split("//")
     InstanceName = slist[1]
-    CheckPoint = os.path.join(config["checkpoint_dir"], InstanceName +".checkpoint")
-    # Setup Obsclient Parameters
-    ProxyHost = None
-    ProxyPort = None
-    Prefix = None
-
+    CheckPoint = os.path.join(Checkpoint_Dir, InstanceName +".checkpoint")
+   
     # Authenticate with IdP Initiated Federation and return Token
     TokenID = get_token(IAMurl, UserName, UserPass)
 
@@ -400,8 +426,7 @@ def run():
     # Constructs a obs client instance with your account for accessing OBS
     # https://docs.otc.t-systems.com/en-us/sdk_python_api/obs/en-us_topic_0080493206.html
     obsClient = ObsClient(access_key_id=AK, secret_access_key=SK, security_token=TokenID,server=Endpoint, proxy_host=ProxyHost, proxy_port=ProxyPort)
-    bucketClient = obsClient.bucketClient(BucketName) # Initialize the OBS Client
-
+   
     #Max Key tells the obsclient how many objects to return in the list of each cycle. Can be set from 1-1000. 
     MaxKeys = 100
 
@@ -417,7 +442,7 @@ def run():
 
     while True:
         # Start Processing Logs using the listobjects function defined above. This may cycle multiple times of more than maxkey returned.
-        FinalMarker, FinalMarkerTag = processlogs(bucketClient, prefix=Prefix, marker=LastMarker, max_keys=MaxKeys, source=InstanceName)
+        FinalMarker, FinalMarkerTag = processlogs(obsClient, prefix=Prefix, marker=LastMarker, max_keys=MaxKeys, source=InstanceName)
         if FinalMarkerTag is None:
             fo = open(CheckPoint, "w")
             fo.write(FinalMarker)
