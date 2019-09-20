@@ -7,7 +7,7 @@ import sys
 import time
 import urllib
 import os
-from obs import *
+from com.obs.client.obs_client import ObsClient
 import gzip
 from cStringIO import StringIO
 import urlparse
@@ -17,9 +17,6 @@ import logging
 import requests
 import json
 from __builtin__ import Exception
-import re
-from urllib import quote
-from requests.cookies import merge_cookies
 import subprocess
 
 # set up logging suitable for splunkd consumption
@@ -43,22 +40,30 @@ SCHEME = """<scheme>
                 <title>Instance Name</title>
                 <description>Provide a unique name for this Instance/Stanza. IE: Cloudtrace, VPCFlow</description>
             </arg>
-
+            <arg name="idpname">
+                <title>IDPNAme</title>
+                <description>Enter the name of the IDP Definition used for authentication.</description>
+            </arg>
+             <arg name="obsendpoint">
+                <title>Object Storage Endpoint</title>
+                <description>Enter the name of the Endpoint for the OBS services.</description>
+            </arg>
             <arg name="bucketname">
                 <title>Bucketname</title>
                 <description>Enter the name of the Bucket on OBS soring the log traces.</description>
             </arg>
-
-            <arg name="idpname">
-                <title>IdP Name</title>
-                <description>The name of the OTC Identity Provider Definition</description>
+            <arg name="prefix">
+                <title>Log Prefix</title>
+                <description>The The prefix defined in the trace log definition</description>
             </arg>
-
+            <arg name="maxkeys">
+                <title>Max Keys</title>
+                <description>Enter the Max Keys parameter (100-1000). This is a tuning parameter for OBS Client</description>
+            </arg>
             <arg name="username">
                 <title>User Name</title>
                 <description>Azure AD or Other user accounts</description>
             </arg>
-
             <arg name="userpass">
                 <title>User password</title>
                 <description>Azure AD or Other user accounts password</description>
@@ -229,8 +234,11 @@ def get_config(): # read XML configuration passed from splunkd
 
         # just some validation: make sure these keys are present (required)
         validate_conf(config, "name")
-        validate_conf(config, "bucketname")
         validate_conf(config, "idpname")
+        validate_conf(config, "bucketname")
+        validate_conf(config, "obsendpoint")
+        validate_conf(config, "prefix")
+        validate_conf(config, "maxkeys")
         validate_conf(config, "username")
         validate_conf(config, "userpass")
         validate_conf(config, "checkpoint_dir")
@@ -284,26 +292,38 @@ def test():
     sys.exit(0)
 
 def run():
+    # Initialize Parameters
+    ProxyHost = None
+    ProxyPort = None
+    Prefix = None
+    LastMarker = None
     # Read Parameters passed by Splunk Configuration
     config = get_config()
     Instance = config["name"]
+    IdpName = config["idpname"]
+    OBSEndpoint = config["obsendpoint"]
     BucketName = config["bucketname"]
-    IdPName = config["idpname"]
+    Prefix = config["prefix"]
+    MaxKeys = config["maxkeys"]
     UserName = config["username"]
     UserPass = config["userpass"]
-    
-    # # Build the Url for the OTC Federated Authentication. the IdPName is passed by the user in sysargs.
-    IAMurl = "https://iam.eu-de.otc.t-systems.com/v3/OS-FEDERATION/identity_providers/" + IdPName + "/protocols/saml/auth"
-    OBSurl = "obs.eu-de.otc.t-systems.com"
 
+    # Testing Variables
+    Instance = "CTStrace"
+    IdpName = "myidp"
+    OBSEndpoint = "obs.eu-de.otc.t-systems.com"
+    BucketName = "obs-robert"
+    Prefix = "CTS"
+    MaxKeys = "500"
+    UserName = "robert"
+    UserPass = "password"
+
+    
     # # Setup Checkpoint file name based on Instance name. We ae parsing the name passed by Splunk
     slist = Instance.split("//")
     InstanceName = slist[1]
     CheckPoint = os.path.join(config["checkpoint_dir"], InstanceName +".checkpoint")
-    # Setup Obsclient Parameters
-    ProxyHost = None
-    ProxyPort = None
-    Prefix = None
+    
 
     # Authenticate with IdP Initiated Federation and return Token (Powershell Script)
     TokenID = get_token(UserName, UserPass)
@@ -313,16 +333,8 @@ def run():
 
     # Constructs a obs client instance with your account for accessing OBS
     # https://docs.otc.t-systems.com/en-us/sdk_python_api/obs/en-us_topic_0080493206.html
-    
-    obsClient = ObsClient(access_key_id=AK, secret_access_key=SK, security_token=TokenID,server=OBSurl, proxy_host=ProxyHost, proxy_port=ProxyPort)
-    bucketClient = obsClient.bucketClient(BucketName) # Initialize the OBS Client
-
-    #Max Key tells the obsclient how many objects to return in the list of each cycle. Can be set from 1-1000. 
-    MaxKeys = 100
-
-    # Initialize the chechpoint marker. 
-    LastMarker = None
-    
+    obsClient = ObsClient(access_key_id=AK, secret_access_key=SK, security_token=TokenID,server=OBSEndpoint, proxy_host=ProxyHost, proxy_port=ProxyPort)
+  
     # We check if the last run saved the checkpoint object so that we don't process already processed logs.
     if os.path.exists(CheckPoint):
         if os.path.getsize(CheckPoint):
@@ -332,7 +344,7 @@ def run():
 
     while True:
         # Start Processing Logs using the listobjects function defined above. This may cycle multiple times of more than maxkey returned.
-        FinalMarker, FinalMarkerTag = processlogs(bucketClient, prefix=Prefix, marker=LastMarker, max_keys=MaxKeys, source=InstanceName)
+        FinalMarker, FinalMarkerTag = processlogs(obsClient, prefix=Prefix, marker=LastMarker, max_keys=MaxKeys, source=InstanceName)
         if FinalMarkerTag is None:
             fo = open(CheckPoint, "w")
             fo.write(FinalMarker)
