@@ -91,9 +91,8 @@ def http_get(IAMurl, headers, verify=False, cert=None, proxies=None, cookies=Non
 def get_token(UserName, UserPass, IdpName):
 
     PowerShellPath = r'C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\powershell.exe'
-    # PowerShellCmd  = r'C:\\Program Files\\Splunk\\etc\\apps\\obs_ta_idp\\bin\\otc-get-token.ps1'
-    PowerShellCmd  = r'C:\\Users\\rtcor\\.vscode\\PythonProjects\\Splunk\\obs_ta_idp_ey\\bin\\otc-get-token.ps1'
-    
+    PowerShellCmd  = r'C:\\Program Files\\Splunk\\etc\\apps\\obs_ta_idp\\bin\\otc-get-token.ps1'
+       
     p = subprocess.Popen([PowerShellPath,'-ExecutionPolicy','Bypass','-file',PowerShellCmd,UserName,UserPass]
         ,stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     TokenID, err = p.communicate()
@@ -299,26 +298,14 @@ def run():
     Prefix = None
     OBSEndpoint = "obs.eu-de.otc.t-systems.com"
     # Read Parameters passed by Splunk Configuration
-    # config = get_config()
-    # Instance = config["name"]
-    # BucketName = config["bucketname"]
-    # IdpName = config["idpname"]
-    # UserName = config["username"]
-    # UserPass = config["userpass"]
-    # CheckPoint_dir = config["checkpoint_dir"]
-    
-    # Testing Variables
-    Instance = "CTStrace//default"
-    IdpName = "myidp"
-    OBSEndpoint = "obs.eu-de.otc.t-systems.com"
-    BucketName = "obs-robert"
-    Prefix = None
-    MaxKeys = "500"
-    UserName = "robert"
-    UserPass = "password"
-    CheckPoint_dir = "C:/temp"
-
-    
+    config = get_config()
+    Instance = config["name"]
+    BucketName = config["bucketname"]
+    IdpName = config["idpname"]
+    UserName = config["username"]
+    UserPass = config["userpass"]
+    CheckPoint_dir = config["checkpoint_dir"]
+          
     # # Setup Checkpoint file name based on Instance name. We ae parsing the name passed by Splunk
     slist = Instance.split("//")
     InstanceName = slist[0]
@@ -326,7 +313,7 @@ def run():
     
 
     # Authenticate with IdP Initiated Federation and return Token (Powershell Script)
-    TokenID = get_token(UserName, UserPass, IdpName)
+    TokenID = get_token(UserName, UserPass)
 
     # Get Temporary AK/SK from IAM for Federated User
     AK, SK, TokenID = get_ak(TokenID,Proxies)
