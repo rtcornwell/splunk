@@ -2,7 +2,6 @@
 # -*- coding:utf-8 -*-
 # Splunk Application to import Object Storage CTS Logs.
 # Written for EY using the EY Powershell Authentication script for Federated users.
- 
 import sys
 import time
 import urllib
@@ -40,25 +39,13 @@ SCHEME = """<scheme>
                 <title>Instance Name</title>
                 <description>Provide a unique name for this Instance/Stanza. IE: Cloudtrace, VPCFlow</description>
             </arg>
-            <arg name="idpname">
-                <title>IDPNAme</title>
-                <description>Enter the name of the IDP Definition used for authentication.</description>
-            </arg>
-             <arg name="obsendpoint">
-                <title>Object Storage Endpoint</title>
-                <description>Enter the name of the Endpoint for the OBS services.</description>
-            </arg>
             <arg name="bucketname">
                 <title>Bucketname</title>
                 <description>Enter the name of the Bucket on OBS soring the log traces.</description>
             </arg>
-            <arg name="prefix">
-                <title>Log Prefix</title>
-                <description>The The prefix defined in the trace log definition</description>
-            </arg>
-            <arg name="maxkeys">
-                <title>Max Keys</title>
-                <description>Enter the Max Keys parameter (100-1000). This is a tuning parameter for OBS Client</description>
+            <arg name="idpname">
+                <title>IDPNAme</title>
+                <description>Enter the name of the IDP Definition used for authentication.</description>
             </arg>
             <arg name="username">
                 <title>User Name</title>
@@ -101,10 +88,11 @@ def http_get(IAMurl, headers, verify=False, cert=None, proxies=None, cookies=Non
     return response
 
 # Function to authenticate with Azure SSO and return authentication Token calling Powershell script
-def get_token(UserName, UserPass):
+def get_token(UserName, UserPass, IdpName):
 
     PowerShellPath = r'C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\powershell.exe'
-    PowerShellCmd  = r'C:\\Program Files\\Splunk\\etc\\apps\\obs_ta_idp\\bin\\otc-get-token.ps1'
+    # PowerShellCmd  = r'C:\\Program Files\\Splunk\\etc\\apps\\obs_ta_idp\\bin\\otc-get-token.ps1'
+    PowerShellCmd  = r'C:\\Users\\rtcor\\.vscode\\PythonProjects\\Splunk\\obs_ta_idp_ey\\bin\\otc-get-token.ps1'
     
     p = subprocess.Popen([PowerShellPath,'-ExecutionPolicy','Bypass','-file',PowerShellCmd,UserName,UserPass]
         ,stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -112,21 +100,23 @@ def get_token(UserName, UserPass):
     rc = p.returncode
     if(err):
         raise Exception('Error: ' + str(err))
-
-    return TokenID
+    return TokenID.strip()
 
 # Function to request temporary AK/SK and security key https://docs.otc.t-systems.com/en-us/api/iam/en-us_topic_0097949518.html
-def get_ak(TokenID):
+def get_ak(TokenID,Proxies=None):
     url = "https://iam.eu-de.otc.t-systems.com/v3.0/OS-CREDENTIAL/securitytokens"
-    body = "{\"auth\":{\"identity\":{\"methods\":[\"token\"],\"token\":{\"id\":\"" + TokenID + "\",\"duration-seconds\":\"900\"}}}}"
+    body = '{\"auth\":{\"identity\":{\"methods\": [\"token\"],\"token\":{\"id\": \"'+ TokenID.strip() +'\",\"duration-seconds\": \"900\"}}}}'
     Header = dict()
-    Header.setdefault("X-Auth-Token", TokenID)
     Header.setdefault("Content-type", "application/json;charset=utf8")
-    resp = http_post(url, Header, body)
-    data = json.loads(resp.text)
-    ak = data["credential"]["access"]
-    sk = data["credential"]["secret"]
-    st = data["credential"]["securitytoken"]
+    resp = requests.request('post', url, data=body, headers=Header, verify=True, cert=None, proxies=Proxies, cookies=None, allow_redirects=False, timeout=600)
+    if resp.status_code!= 201:
+        logging.debug("get_ak: Error Retrievinbg Temp AK/SK: , errorCode:%s" % resp.status_code)
+        sys.exit(2)
+    else: 
+        data = json.loads(resp.text)
+        ak = data["credential"]["access"]
+        sk = data["credential"]["secret"]
+        st = data["credential"]["securitytoken"]
     return (ak, sk, st)
 
 def init_stream():
@@ -155,15 +145,16 @@ def read_gz_file(buffer):
 
 # Connect to OBS and Query all the objects in the Bucket to be processed. 
 # Prefix and marker limit the search. Marker is a checkpoint of last run.
-def processlogs(bucketClient, prefix=None, marker=None, max_keys=None, source=None):
-    resp_list = bucketClient.listObjects(prefix=prefix, marker=marker, max_keys=max_keys, delimiter=None)
+def processlogs(obsClient, BucketName, prefix=None, marker=None, max_keys=None, source=None):
+
+    resp_list = obsClient.listObjects(BucketName, marker=marker, max_keys=max_keys,prefix=prefix)
     if resp_list.status < 300:
-        if resp_list.body:
-            if resp_list.body.contents:
-                i = 0
-                for content in resp_list.body.contents:
-                    resp_get = bucketClient.getObject(content.key, loadStreamInMemory=True)
-                    if resp_get.status < 300:
+        if resp_list.body.contents:
+            i = 0
+            for content in resp_list.body.contents:
+                if content.key.endswith('.gz'):
+                    resp_get = obsClient.getObject(BucketName,content.key, loadStreamInMemory=True)
+                    if resp_get.status < 300 :
                         init_stream()
                         StreamData = read_gz_file(resp_get.body.buffer)
                         # Parse individual events from json Data (trace events) and send event to splunk indexer.
@@ -176,15 +167,21 @@ def processlogs(bucketClient, prefix=None, marker=None, max_keys=None, source=No
                             Event['record_time'] = int(round(Event['record_time'] / 1000))
                             send_event(json.dumps(Event), Event['time'], source) 
                         fini_stream()
-                    i += 1
-                    sys.stdout.flush()
-                return content.key, resp_list.body.next_marker
-        return marker, None
+                    else:
+                        logging.debug("ProcessLogs: Error Accessing file: "+content.key+" Errocode: %s" , resp_get.returncode)
+                        sys.exit(2)
+                else:
+                    logging.info("ProcessLogs: Skipping File that is not a Log File: %s" , content.key)
+                i += 1
+                sys.stdout.flush()
+                
+            return content.key, resp_list.body.next_marker
+        else:
+            return marker, None
     else:
-        logging.debug('errorCode:%s', resp_list.errorCode)
-        logging.debug('errorMessage:%s', resp_list.errorMessage)
-        sys.exit(2)
-
+        logging.debug("Processlogs: Error Accessing OBS Bucket " + BucketName + ",errorCode:%s", resp_list.status)
+        logging.debug('ProcessLogs: Error Message:%s', resp_list.errorMessage)
+        return None, None
 # prints XML error data to be consumed by Splunk
 def print_error(s):
     print "<error><message>%s</message></error>" % xml.sax.saxutils.escape(s)
@@ -234,11 +231,8 @@ def get_config(): # read XML configuration passed from splunkd
 
         # just some validation: make sure these keys are present (required)
         validate_conf(config, "name")
-        validate_conf(config, "idpname")
         validate_conf(config, "bucketname")
-        validate_conf(config, "obsendpoint")
-        validate_conf(config, "prefix")
-        validate_conf(config, "maxkeys")
+        validate_conf(config, "idpname")
         validate_conf(config, "username")
         validate_conf(config, "userpass")
         validate_conf(config, "checkpoint_dir")
@@ -292,48 +286,63 @@ def test():
     sys.exit(0)
 
 def run():
-    # Initialize Parameters
+    # Initialize Parameters (Proxy not Used in this script)
     ProxyHost = None
     ProxyPort = None
+    ProxyUserName = None
+    ProxyPassword = None
+    Proxies = None
     Prefix = None
     LastMarker = None
+    FinalMarker = None
+    MaxKeys = 100
+    Prefix = None
+    OBSEndpoint = "obs.eu-de.otc.t-systems.com"
     # Read Parameters passed by Splunk Configuration
-    config = get_config()
-    Instance = config["name"]
-    IdpName = config["idpname"]
-    OBSEndpoint = config["obsendpoint"]
-    BucketName = config["bucketname"]
-    Prefix = config["prefix"]
-    MaxKeys = config["maxkeys"]
-    UserName = config["username"]
-    UserPass = config["userpass"]
-
+    # config = get_config()
+    # Instance = config["name"]
+    # BucketName = config["bucketname"]
+    # IdpName = config["idpname"]
+    # UserName = config["username"]
+    # UserPass = config["userpass"]
+    # CheckPoint_dir = config["checkpoint_dir"]
+    
     # Testing Variables
-    Instance = "CTStrace"
+    Instance = "CTStrace//default"
     IdpName = "myidp"
     OBSEndpoint = "obs.eu-de.otc.t-systems.com"
     BucketName = "obs-robert"
-    Prefix = "CTS"
+    Prefix = None
     MaxKeys = "500"
     UserName = "robert"
     UserPass = "password"
+    CheckPoint_dir = "C:/temp"
 
     
     # # Setup Checkpoint file name based on Instance name. We ae parsing the name passed by Splunk
     slist = Instance.split("//")
-    InstanceName = slist[1]
-    CheckPoint = os.path.join(config["checkpoint_dir"], InstanceName +".checkpoint")
+    InstanceName = slist[0]
+    CheckPoint = os.path.join(CheckPoint_dir, InstanceName +".checkpoint")
     
 
     # Authenticate with IdP Initiated Federation and return Token (Powershell Script)
-    TokenID = get_token(UserName, UserPass)
+    TokenID = get_token(UserName, UserPass, IdpName)
 
     # Get Temporary AK/SK from IAM for Federated User
-    AK, SK, TokenID = get_ak(TokenID)
+    AK, SK, TokenID = get_ak(TokenID,Proxies)
 
     # Constructs a obs client instance with your account for accessing OBS
     # https://docs.otc.t-systems.com/en-us/sdk_python_api/obs/en-us_topic_0080493206.html
-    obsClient = ObsClient(access_key_id=AK, secret_access_key=SK, security_token=TokenID,server=OBSEndpoint, proxy_host=ProxyHost, proxy_port=ProxyPort)
+    obsClient = ObsClient(
+        access_key_id=AK, 
+        secret_access_key=SK, 
+        security_token=TokenID,
+        server=OBSEndpoint, 
+        proxy_host=ProxyHost, 
+        proxy_port=ProxyPort,
+        proxy_username =ProxyUserName,
+        proxy_password=ProxyPassword
+    )
   
     # We check if the last run saved the checkpoint object so that we don't process already processed logs.
     if os.path.exists(CheckPoint):
@@ -344,12 +353,14 @@ def run():
 
     while True:
         # Start Processing Logs using the listobjects function defined above. This may cycle multiple times of more than maxkey returned.
-        FinalMarker, FinalMarkerTag = processlogs(obsClient, prefix=Prefix, marker=LastMarker, max_keys=MaxKeys, source=InstanceName)
+        FinalMarker, FinalMarkerTag = processlogs(obsClient, BucketName, prefix=Prefix, marker=LastMarker, max_keys=MaxKeys, source=InstanceName)
         if FinalMarkerTag is None:
-            fo = open(CheckPoint, "w")
-            fo.write(FinalMarker)
-            fo.close()
-            break
+            if FinalMarker is not None:
+                fo = open(CheckPoint, "w")
+                fo.write(FinalMarker)
+                fo.close()
+            else:
+                break
         LastMarker = FinalMarker
 
 if __name__ == '__main__':
