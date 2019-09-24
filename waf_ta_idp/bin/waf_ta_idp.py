@@ -93,8 +93,7 @@ def get_token(UserName, UserPass, IdpName):
 
     PowerShellPath = r'C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\powershell.exe'
     # PowerShellCmd  = r'C:\\Program Files\\Splunk\\etc\\apps\\obs_ta_idp\\bin\\otc-get-token.ps1'
-    PowerShellCmd  = r'C:\\Users\\rtcor\\.vscode\\PythonProjects\\Splunk\\obs_ta_idp_ey\bin\\otc-get-token.ps1'
-          
+    PowerShellCmd  = r'C:\\Users\\rtcor\\.vscode\\PythonProjects\\Splunk\\waf_ta_idp\bin\\otc-get-token.ps1'
     p = subprocess.Popen([PowerShellPath,'-ExecutionPolicy','Bypass','-file',PowerShellCmd,UserName,UserPass,IdpName]
         ,stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     TokenID, err = p.communicate()
@@ -232,6 +231,8 @@ def run():
     ProxyPassword = None
     Proxies = None
     VerifyCert=False
+    ToTime = str(int(time.time())*1000)
+    FromTime = str(int(time.time()-7200)*1000)
     # Read Parameters passed by Splunk Configuration
     # config = get_config()
     # Instance = config["name"]
@@ -256,28 +257,37 @@ def run():
 
     # Authenticate with IdP Initiated Federation and return Token (Powershell Script)
     TokenID = get_token(UserName, UserPass, IdpName)
-
+    # TokenID = "MIIGeAYJKoZIhvcNAQcCoIIGaTCCBmUCAQExDTALBglghkgBZQMEAgEwggRGBgkqhkiG9w0BBwGgggQ3BIIEM3sidG9rZW4iOnsiZXhwaXJlc19hdCI6IjIwMTktMDktMjVUMTc6MDg6MDEuMjY2MDAwWiIsIm1ldGhvZHMiOlsicGFzc3dvcmQiXSwiY2F0YWxvZyI6W10sInJvbGVzIjpbeyJuYW1lIjoidGVfYWdlbmN5IiwiaWQiOiI0MWNlNTg1N2M5NGM0Nzc1YjZjYzUzZDVmZWViYTQ0NSJ9LHsibmFtZSI6InRlX2FkbWluIiwiaWQiOiI2OTliZDYyY2RhMzA0ZDJjYWQwM2ZkMmZiMTkwYjhjZiJ9LHsibmFtZSI6InNkcnNfYWRtIiwiaWQiOiI1ZDNlMWYzYjQ1MmM0MTAwODY5MmE0ZWI5MDUzMTA5OSJ9LHsibmFtZSI6IndhZl9hZG0iLCJpZCI6IjZiZDk5Yzg5ZjNjNDQ4OThiNzkzYTk4ZDFkOWYyNjY2In0seyJuYW1lIjoiZG1zX2FkbSIsImlkIjoiNDFmZjZhNzc5ZmEwNGU1YmFhNzkxZTQ1YzM3ZjViYWIifSx7Im5hbWUiOiJzZXJ2ZXJfYWRtIiwiaWQiOiI1OThjYzIyMTgzN2I0ZGM0YjUyOTg2OTczYWVmM2QzZSJ9LHsibmFtZSI6InNtbl9hZG0iLCJpZCI6ImVhOWQ4NTYwYmQ2ZTRiYmVhZTJlYzEyNTY1YjQ0MmEwIn0seyJuYW1lIjoib3BfZ2F0ZWRfY2NlX3N3aXRjaCIsImlkIjoiMCJ9XSwicHJvamVjdCI6eyJkb21haW4iOnsieGRvbWFpbl90eXBlIjoiVFNJIiwibmFtZSI6Ik9UQzAwMDAwMDAwMDAxMDAwMDEwNTAxIiwiaWQiOiJhMDFhYWZjZjYzNzQ0ZDk4OGViZWYyYjFlMDRjNWMzNCIsInhkb21haW5faWQiOiIwMDAwMDAwMDAwMTAwMDAxMDUwMSJ9LCJuYW1lIjoiZXUtZGUiLCJpZCI6ImJmNzQyMjlmMzBjMDQyMWZhZTI3MDM4NmE0MzMxNWVlIn0sImlzc3VlZF9hdCI6IjIwMTktMDktMjRUMTc6MDg6MDEuMjY2MDAwWiIsInVzZXIiOnsiZG9tYWluIjp7Inhkb21haW5fdHlwZSI6IlRTSSIsIm5hbWUiOiJPVEMwMDAwMDAwMDAwMTAwMDAxMDUwMSIsImlkIjoiYTAxYWFmY2Y2Mzc0NGQ5ODhlYmVmMmIxZTA0YzVjMzQiLCJ4ZG9tYWluX2lkIjoiMDAwMDAwMDAwMDEwMDAwMTA1MDEifSwibmFtZSI6InJvYmVydGNvcm53ZWxsIiwicGFzc3dvcmRfZXhwaXJlc19hdCI6IjIwMjAtMDMtMDdUMTU6NDA6MTYuMDAwMDAwIiwiaWQiOiI2ZmU3NzY0YTRmZTM0ZjVmOTYzYTk4M2YxZmY4ZDI0YiJ9fX0xggIFMIICAQIBATBcMFcxCzAJBgNVBAYTAlVTMQ4wDAYDVQQIDAVVbnNldDEOMAwGA1UEBwwFVW5zZXQxDjAMBgNVBAoMBVVuc2V0MRgwFgYDVQQDDA93d3cuZXhhbXBsZS5jb20CAQEwCwYJYIZIAWUDBAIBMA0GCSqGSIb3DQEBAQUABIIBgAcznk3jVXU1vvgP7ELh2QTjSlirOtZM5r+mzbLfuY9AA6uQQOESqhqKcyzTUln-gwkGBwvZMg1DtY4Wdtd8IM6ZqaxzTivcpyYlosgF4RP8AiGGPdDpkiC9G4JpuBKCJgYVNxjoY7KnjmMBYxLyQ6OHHR0siOXz428doyRkcXSBYAO1jv4u+My1iYTnrZCFaYwwumZfxVAkHW40osnl884DZ-VMyMXHWxoIr9hTo8ewvTa2iv-iegYU2uHgIdyis4FXilQvtkNWAJcUgb0bt8U7iz2u18zc-3Wf-n+Hj4TdbNJheyzhsiX7fgRD4mbGfoc8h+NkHP-PcSrDh4TZAMqvlCMwcLb2DFr+P2TcbVkHPs0py1Pf4oOT0r33VYKMsOOAaJK5gkPuHxG7K3LptGTvKNmo9WgFZtcU9iE9oRxzj8RFZocZnzS1KLXOMNpCzoCqqSqbvgjmyV5303904LeZc0sr1TtAUfUfFIDr55+VVQa4bkpz9icANcVxizzzHw=="
     # We check if the last run saved the checkpoint object so that we don't process already processed logs.
     if os.path.exists(CheckPoint):
         if os.path.getsize(CheckPoint):
             fo = open(CheckPoint, "r+" )
-            LastMarker = fo.readline()
+            FromTime = fo.readline()
             fo.close()
-    parms = "from=1548172800000&to=1548431999000"
+
+    parms = "from="+ FromTime + "&to="+ ToTime
     url = "https://waf.eu-de.otc.t-systems.com/v1/" + ProjectID +"/waf/event?"+ parms
-    print url
-    print TokenID
     Header = dict()
-    body = ""
-    Header.setdefault("X-Auth-Token",TokenID.strip())
+    Header.setdefault("X-Auth-Token",TokenID)
     Header.setdefault("Content-type", "application/json;charset=utf8")
     resp = http_get(url, Header, verify=True, cert=None, proxies=None, cookies=None)
-    if resp.status_code!= 200:
-        logging.debug("get_ak: Error Retrievinbg Events: , errorCode:%s" % resp.status_code)
-    else: 
+    if resp.status_code== 200:
+       
         data = json.loads(resp.text)
-        print data
-        
+    
+        Events = data["items"]
+        for Event in Events:
+            init_stream()
+            # Convert timestamp in event from millisecond posix to seconds possix
+            Event['time'] = int(round(Event['time'] / 1000))
+            #Send formatted event data to sysout (Splunk Indexer)
+            send_event(json.dumps(Event), Event['time'], InstanceName) 
+            fini_stream()      
+    else: 
+         logging.debug("get_ak: Error Retrievinbg Events: , errorCode:%s" % resp.status_code)
+    fo = open(CheckPoint, "w")
+    fo.write(ToTime)
+    fo.close()
 if __name__ == '__main__':
     if len(sys.argv) > 1:
         if sys.argv[1] == "--scheme":
