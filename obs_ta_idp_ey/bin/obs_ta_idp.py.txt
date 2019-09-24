@@ -40,6 +40,14 @@ SCHEME = """<scheme>
                 <title>Instance Name</title>
                 <description>Provide a unique name for this Instance/Stanza. IE: Cloudtrace, VPCFlow</description>
             </arg>
+            <arg name="obsendpoint">
+                <title>OBSEndpoint</title>
+                <description>Endpoint of the Object Storage Service: IE: obs.eu-de.otc.t-systems.com .</description>
+            </arg>
+             <arg name="bucketfolder">
+                <title>Bucket Folder</title>
+                <description>Enter the root Bucket Folder Name where the logs are stored in the Bucket: CloudTraces, LogTanks</description>
+            </arg>
             <arg name="bucketname">
                 <title>Bucketname</title>
                 <description>Enter the name of the Bucket on OBS soring the log traces.</description>
@@ -55,6 +63,14 @@ SCHEME = """<scheme>
             <arg name="userpass">
                 <title>User password</title>
                 <description>Azure AD or Other user accounts password</description>
+            </arg>
+            <arg name="logprefix">
+                <title>Log file name prefix</title>
+                <description>This should be the first letters of the log name: Case sensative.</description>
+            </arg>
+            <arg name="maxkeys">
+                <title>Maxkeys</title>
+                <description>Maximum numbwer of objects (files) to pull in one cycle (100-1000).</description>
             </arg>
       </args>
     </endpoint>
@@ -89,12 +105,13 @@ def http_get(IAMurl, headers, verify=False, cert=None, proxies=None, cookies=Non
     return response
 
 # Function to authenticate with Azure SSO and return authentication Token calling Powershell script
-def get_token(UserName, UserPass):
+def get_token(UserName, UserPass, IdpName):
 
     PowerShellPath = r'C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\powershell.exe'
-    PowerShellCmd  = r'C:\\Program Files\\Splunk\\etc\\apps\\obs_ta_idp\\bin\\otc-get-token.ps1'
+    # PowerShellCmd  = r'C:\\Program Files\\Splunk\\etc\\apps\\obs_ta_idp\\bin\\otc-get-token.ps1'
+    PowerShellCmd  = r'C:\\Users\\rtcor\\.vscode\\PythonProjects\\Splunk\\obs_ta_idp_ey\bin\\otc-get-token.ps1'
           
-    p = subprocess.Popen([PowerShellPath,'-ExecutionPolicy','Bypass','-file',PowerShellCmd,UserName,UserPass]
+    p = subprocess.Popen([PowerShellPath,'-ExecutionPolicy','Bypass','-file',PowerShellCmd,UserName,UserPass,IdpName]
         ,stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     TokenID, err = p.communicate()
     rc = p.returncode
@@ -103,12 +120,12 @@ def get_token(UserName, UserPass):
     return TokenID.strip()
 
 # Function to request temporary AK/SK and security key https://docs.otc.t-systems.com/en-us/api/iam/en-us_topic_0097949518.html
-def get_ak(TokenID,Proxies=None):
+def get_ak(TokenID,Proxies=None, Verify=False):
     url = "https://iam.eu-de.otc.t-systems.com/v3.0/OS-CREDENTIAL/securitytokens"
     body = '{\"auth\":{\"identity\":{\"methods\": [\"token\"],\"token\":{\"id\": \"'+ TokenID.strip() +'\",\"duration-seconds\": \"900\"}}}}'
     Header = dict()
     Header.setdefault("Content-type", "application/json;charset=utf8")
-    resp = requests.request('post', url, data=body, headers=Header, verify=True, cert=None, proxies=Proxies, cookies=None, allow_redirects=False, timeout=600)
+    resp = requests.request('post', url, data=body, headers=Header, verify=Verify, cert=None, proxies=Proxies, cookies=None, allow_redirects=False, timeout=600)
     if resp.status_code!= 201:
         logging.debug("get_ak: Error Retrievinbg Temp AK/SK: , errorCode:%s" % resp.status_code)
         sys.exit(2)
@@ -145,13 +162,16 @@ def read_gz_file(buffer):
 
 # Connect to OBS and Query all the objects in the Bucket to be processed. 
 # Prefix and marker limit the search. Marker is a checkpoint of last run.
-def processlogs(obsClient, BucketName, prefix=None, marker=None, max_keys=None, source=None):
+def processlogs(obsClient, BucketName, Bucket_folder, prefix=None, marker=None, max_keys=None, source=None):
 
-    resp_list = obsClient.listObjects(BucketName, marker=marker, max_keys=max_keys,prefix=prefix)
+    resp_list = obsClient.listObjects(BucketName, marker=marker, max_keys=max_keys, prefix=Bucket_folder)
     if resp_list.status < 300:
         if resp_list.body.contents:
             for content in resp_list.body.contents:
-                if content.key.endswith('.gz'):
+                objectList = content.key.split('/')
+                objectKey = objectList[len(objectList)-1]
+                #Only process Logs that match the prefix passed and is a log file.
+                if content.key.endswith('.gz') and objectKey.startswith(prefix):
                     resp_get = obsClient.getObject(BucketName,content.key, loadStreamInMemory=True)
                     if resp_get.status < 300 :
                         init_stream()
@@ -160,7 +180,6 @@ def processlogs(obsClient, BucketName, prefix=None, marker=None, max_keys=None, 
                         # Parse individual events from json Data (trace events) and send event to splunk indexer.
                         # https://docs.otc.t-systems.com/en-us/usermanual/cts/en-us_topic_0030598500.html
                         # Each log may contain one or many events so we want to parse each event and process each individually.
-                        # Events = json.loads(StreamData)
                         for Event in Events:
                             # Test if JSON Object is returned (List) or a Json String. Convert string to list
                             if isinstance(Event, unicode):
@@ -177,9 +196,8 @@ def processlogs(obsClient, BucketName, prefix=None, marker=None, max_keys=None, 
                         logging.debug("ProcessLogs: Error Accessing file: "+content.key+" Errocode: %s" , resp_get.returncode)
                         sys.exit(2)
                 else:
-                    logging.info("ProcessLogs: Skipping File that is not a Log File: %s" , content.key)
-                sys.stdout.flush()
-                
+                    logging.info("ProcessLogs: Skipping File that is not a matching Log File: %s" , content.key)
+                 
             return content.key, resp_list.body.next_marker
         else:
             return marker, None
@@ -236,10 +254,14 @@ def get_config(): # read XML configuration passed from splunkd
 
         # just some validation: make sure these keys are present (required)
         validate_conf(config, "name")
+        validate_conf(config, "obsendpoint")
+        validate_conf(config, "bucketfolder")
         validate_conf(config, "bucketname")
         validate_conf(config, "idpname")
         validate_conf(config, "username")
         validate_conf(config, "userpass")
+        validate_conf(config, "logprefix")
+        validate_conf(config, "maxkeys")
         validate_conf(config, "checkpoint_dir")
     except Exception, e:
         raise Exception, "Error getting Splunk configuration via STDIN: %s" % str(e)
@@ -297,20 +319,22 @@ def run():
     ProxyUserName = None
     ProxyPassword = None
     Proxies = None
-    Prefix = None
+    VerifyCert=False
     LastMarker = None
     FinalMarker = None
-    MaxKeys = 500
-    Prefix = None
-    OBSEndpoint = "obs.eu-de.otc.t-systems.com"
     # Read Parameters passed by Splunk Configuration
     config = get_config()
     Instance = config["name"]
+    OBSEndpoint = config["obsendpoint"]
+    BucketFolder = config["bucketfolder"]
     BucketName = config["bucketname"]
     IdpName = config["idpname"]
     UserName = config["username"]
     UserPass = config["userpass"]
+    MaxKeys = config["maxkeys"]
+    Prefix = config["logprefix"]
     CheckPoint_dir = config["checkpoint_dir"]
+    
               
     # # Setup Checkpoint file name based on Instance name. We ae parsing the name passed by Splunk
     slist = Instance.split("//")
@@ -319,10 +343,10 @@ def run():
     
 
     # Authenticate with IdP Initiated Federation and return Token (Powershell Script)
-    TokenID = get_token(UserName, UserPass)
+    TokenID = get_token(UserName, UserPass,IdpName)
 
     # Get Temporary AK/SK from IAM for Federated User
-    AK, SK, TokenID = get_ak(TokenID,Proxies)
+    AK, SK, TokenID = get_ak(TokenID,Proxies,VerifyCert)
 
     # Constructs a obs client instance with your account for accessing OBS
     # https://docs.otc.t-systems.com/en-us/sdk_python_api/obs/en-us_topic_0080493206.html
@@ -333,7 +357,7 @@ def run():
         server=OBSEndpoint, 
         proxy_host=ProxyHost, 
         proxy_port=ProxyPort,
-        proxy_username =ProxyUserName,
+        proxy_username=ProxyUserName,
         proxy_password=ProxyPassword
     )
   
@@ -346,11 +370,12 @@ def run():
 
     while True:
         # Start Processing Logs using the listobjects function defined above. This may cycle multiple times of more than maxkey returned.
-        FinalMarker, FinalMarkerTag = processlogs(obsClient, BucketName, prefix=Prefix, marker=LastMarker, max_keys=MaxKeys, source=InstanceName)
+        FinalMarker, FinalMarkerTag = processlogs(obsClient, BucketName, BucketFolder, prefix=Prefix, marker=LastMarker, max_keys=MaxKeys, source=InstanceName)
         if FinalMarkerTag is None:
             fo = open(CheckPoint, "w")
             fo.write(FinalMarker)
             fo.close()
+            obsClient.close()
             break
         LastMarker = FinalMarker
         
