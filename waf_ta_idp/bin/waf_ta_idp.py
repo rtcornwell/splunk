@@ -4,12 +4,9 @@
 # Written for EY using the EY Powershell Authentication script for Federated users.
 import sys
 import time
-import datetime
-import urllib
 import os
 import gzip
 from cStringIO import StringIO
-import urlparse
 import xml.dom.minidom
 import xml.sax.saxutils
 import logging
@@ -60,40 +57,11 @@ SCHEME = """<scheme>
     </endpoint>
 </scheme>
 """
-
-def http_request(IAMurl, method, header, body=None, request_verify=False, request_cert=None, proxies=None, cookies=None):
-    if body != None and type(body) != str:
-        body = str(body)
-
-    if header != None and type(header) != dict:
-        try:
-            header = json.loads(header)
-
-        except Exception, e:
-            print e
-    if header == None:
-        header = dict()
-
-    header.setdefault("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/53.0.2785.143 Safari/537.36")
-    resp = requests.request(method, IAMurl, data=body, headers=header, verify=request_verify, cert=request_cert, proxies=proxies, cookies=cookies, allow_redirects=False, timeout=600)
-    return resp
-
-def http_post(IAMurl, headers, data, verify=False, cert=None, proxies=None, cookies=None):
-
-    response = http_request(IAMurl, "post", headers, body=data, request_verify=verify, request_cert=cert, proxies=proxies, cookies=cookies)
-    return response
-
-def http_get(IAMurl, headers, verify=False, cert=None, proxies=None, cookies=None):
-    
-    response = http_request(IAMurl, "get", headers, request_verify=verify, request_cert=cert, proxies=proxies, cookies=cookies)
-    return response
-
 # Function to authenticate with Azure SSO and return authentication Token calling Powershell script
 def get_token(UserName, UserPass, IdpName):
 
     PowerShellPath = r'C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\powershell.exe'
-    # PowerShellCmd  = r'C:\\Program Files\\Splunk\\etc\\apps\\obs_ta_idp\\bin\\otc-get-token.ps1'
-    PowerShellCmd  = r'C:\\Users\\rtcor\\.vscode\\PythonProjects\\Splunk\\waf_ta_idp\bin\\otc-get-token.ps1'
+    PowerShellCmd  = r'C:\\Program Files\\Splunk\\etc\\apps\\waf_ta_idp\\bin\\otc-get-token.ps1'
     p = subprocess.Popen([PowerShellPath,'-ExecutionPolicy','Bypass','-file',PowerShellCmd,UserName,UserPass,IdpName]
         ,stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     TokenID, err = p.communicate()
@@ -119,10 +87,6 @@ def send_done_key(source):
     sys.stdout.write("<event unbroken=\"1\"><source>")
     sys.stdout.write(xml.sax.saxutils.escape(source))
     sys.stdout.write("</source><done/></event>\n")
-
-# prints XML error data to be consumed by Splunk
-def print_error(s):
-    print "<error><message>%s</message></error>" % xml.sax.saxutils.escape(s)
 
 def validate_conf(config, key):
     if key not in config:
@@ -230,52 +194,48 @@ def run():
     ProxyUserName = None
     ProxyPassword = None
     Proxies = None
-    VerifyCert=False
     ToTime = str(int(time.time())*1000)
-    FromTime = str(int(time.time()-7200)*1000)
-    # Read Parameters passed by Splunk Configuration
-    # config = get_config()
-    # Instance = config["name"]
-    # IdpName = config["idpname"]
-    # ProjectID = config["projectid"]
-    # UserName = config["username"]
-    # UserPass = config["userpass"]
-    # CheckPoint_dir = config["checkpoint_dir"]
-    Instance = "waf_at_idp//WafLogs"
-    IdpName = "IDP"
-    ProjectID = "bf74229f30c0421fae270386a43315ee"
-    UserName = "robert"
-    UserPass = "pass"
-    CheckPoint_dir = "C:/temp"
     
-              
+    # Read Parameters passed by Splunk Configuration
+    config = get_config()
+    Instance = config["name"]
+    IdpName = config["idpname"]
+    ProjectID = config["projectid"]
+    UserName = config["username"]
+    UserPass = config["userpass"]
+    CheckPoint_dir = config["checkpoint_dir"]
+    
     # # Setup Checkpoint file name based on Instance name. We ae parsing the name passed by Splunk
     slist = Instance.split("//")
     InstanceName = slist[1]
     CheckPoint = os.path.join(CheckPoint_dir, InstanceName +".checkpoint")
     
-
     # Authenticate with IdP Initiated Federation and return Token (Powershell Script)
     TokenID = get_token(UserName, UserPass, IdpName)
-    # TokenID = "MIIGeAYJKoZIhvcNAQcCoIIGaTCCBmUCAQExDTALBglghkgBZQMEAgEwggRGBgkqhkiG9w0BBwGgggQ3BIIEM3sidG9rZW4iOnsiZXhwaXJlc19hdCI6IjIwMTktMDktMjVUMTc6MDg6MDEuMjY2MDAwWiIsIm1ldGhvZHMiOlsicGFzc3dvcmQiXSwiY2F0YWxvZyI6W10sInJvbGVzIjpbeyJuYW1lIjoidGVfYWdlbmN5IiwiaWQiOiI0MWNlNTg1N2M5NGM0Nzc1YjZjYzUzZDVmZWViYTQ0NSJ9LHsibmFtZSI6InRlX2FkbWluIiwiaWQiOiI2OTliZDYyY2RhMzA0ZDJjYWQwM2ZkMmZiMTkwYjhjZiJ9LHsibmFtZSI6InNkcnNfYWRtIiwiaWQiOiI1ZDNlMWYzYjQ1MmM0MTAwODY5MmE0ZWI5MDUzMTA5OSJ9LHsibmFtZSI6IndhZl9hZG0iLCJpZCI6IjZiZDk5Yzg5ZjNjNDQ4OThiNzkzYTk4ZDFkOWYyNjY2In0seyJuYW1lIjoiZG1zX2FkbSIsImlkIjoiNDFmZjZhNzc5ZmEwNGU1YmFhNzkxZTQ1YzM3ZjViYWIifSx7Im5hbWUiOiJzZXJ2ZXJfYWRtIiwiaWQiOiI1OThjYzIyMTgzN2I0ZGM0YjUyOTg2OTczYWVmM2QzZSJ9LHsibmFtZSI6InNtbl9hZG0iLCJpZCI6ImVhOWQ4NTYwYmQ2ZTRiYmVhZTJlYzEyNTY1YjQ0MmEwIn0seyJuYW1lIjoib3BfZ2F0ZWRfY2NlX3N3aXRjaCIsImlkIjoiMCJ9XSwicHJvamVjdCI6eyJkb21haW4iOnsieGRvbWFpbl90eXBlIjoiVFNJIiwibmFtZSI6Ik9UQzAwMDAwMDAwMDAxMDAwMDEwNTAxIiwiaWQiOiJhMDFhYWZjZjYzNzQ0ZDk4OGViZWYyYjFlMDRjNWMzNCIsInhkb21haW5faWQiOiIwMDAwMDAwMDAwMTAwMDAxMDUwMSJ9LCJuYW1lIjoiZXUtZGUiLCJpZCI6ImJmNzQyMjlmMzBjMDQyMWZhZTI3MDM4NmE0MzMxNWVlIn0sImlzc3VlZF9hdCI6IjIwMTktMDktMjRUMTc6MDg6MDEuMjY2MDAwWiIsInVzZXIiOnsiZG9tYWluIjp7Inhkb21haW5fdHlwZSI6IlRTSSIsIm5hbWUiOiJPVEMwMDAwMDAwMDAwMTAwMDAxMDUwMSIsImlkIjoiYTAxYWFmY2Y2Mzc0NGQ5ODhlYmVmMmIxZTA0YzVjMzQiLCJ4ZG9tYWluX2lkIjoiMDAwMDAwMDAwMDEwMDAwMTA1MDEifSwibmFtZSI6InJvYmVydGNvcm53ZWxsIiwicGFzc3dvcmRfZXhwaXJlc19hdCI6IjIwMjAtMDMtMDdUMTU6NDA6MTYuMDAwMDAwIiwiaWQiOiI2ZmU3NzY0YTRmZTM0ZjVmOTYzYTk4M2YxZmY4ZDI0YiJ9fX0xggIFMIICAQIBATBcMFcxCzAJBgNVBAYTAlVTMQ4wDAYDVQQIDAVVbnNldDEOMAwGA1UEBwwFVW5zZXQxDjAMBgNVBAoMBVVuc2V0MRgwFgYDVQQDDA93d3cuZXhhbXBsZS5jb20CAQEwCwYJYIZIAWUDBAIBMA0GCSqGSIb3DQEBAQUABIIBgAcznk3jVXU1vvgP7ELh2QTjSlirOtZM5r+mzbLfuY9AA6uQQOESqhqKcyzTUln-gwkGBwvZMg1DtY4Wdtd8IM6ZqaxzTivcpyYlosgF4RP8AiGGPdDpkiC9G4JpuBKCJgYVNxjoY7KnjmMBYxLyQ6OHHR0siOXz428doyRkcXSBYAO1jv4u+My1iYTnrZCFaYwwumZfxVAkHW40osnl884DZ-VMyMXHWxoIr9hTo8ewvTa2iv-iegYU2uHgIdyis4FXilQvtkNWAJcUgb0bt8U7iz2u18zc-3Wf-n+Hj4TdbNJheyzhsiX7fgRD4mbGfoc8h+NkHP-PcSrDh4TZAMqvlCMwcLb2DFr+P2TcbVkHPs0py1Pf4oOT0r33VYKMsOOAaJK5gkPuHxG7K3LptGTvKNmo9WgFZtcU9iE9oRxzj8RFZocZnzS1KLXOMNpCzoCqqSqbvgjmyV5303904LeZc0sr1TtAUfUfFIDr55+VVQa4bkpz9icANcVxizzzHw=="
+ 
     # We check if the last run saved the checkpoint object so that we don't process already processed logs.
     if os.path.exists(CheckPoint):
         if os.path.getsize(CheckPoint):
             fo = open(CheckPoint, "r+" )
             FromTime = fo.readline()
             fo.close()
+    else:
+        FromTime = str(int(time.time()-7200)*1000)
 
     parms = "from="+ FromTime + "&to="+ ToTime
     url = "https://waf.eu-de.otc.t-systems.com/v1/" + ProjectID +"/waf/event?"+ parms
+    Body = None
     Header = dict()
     Header.setdefault("X-Auth-Token",TokenID)
     Header.setdefault("Content-type", "application/json;charset=utf8")
-    resp = http_get(url, Header, verify=True, cert=None, proxies=None, cookies=None)
+    Header.setdefault("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/53.0.2785.143 Safari/537.36")
+    resp = requests.request('get', url, data=Body, headers=Header, verify=False, cert=None, proxies=Proxies, cookies=None, allow_redirects=False, timeout=600)
+    # resp = http_get(url, Header, verify=True, cert=None, proxies=None, cookies=None)
     if resp.status_code== 200:
        
-        data = json.loads(resp.text)
-    
-        Events = data["items"]
+        respdata = json.loads(resp.text)
+        #WAF Events are returned in the ITEMS element of the response body.
+        Events = respdata["items"]
         for Event in Events:
             init_stream()
             # Convert timestamp in event from millisecond posix to seconds possix
@@ -288,6 +248,7 @@ def run():
     fo = open(CheckPoint, "w")
     fo.write(ToTime)
     fo.close()
+    
 if __name__ == '__main__':
     if len(sys.argv) > 1:
         if sys.argv[1] == "--scheme":

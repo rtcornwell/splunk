@@ -4,13 +4,10 @@
 # Written for EY using the EY Powershell Authentication script for Federated users.
 import sys
 import time
-import datetime
-import urllib
 import os
 from com.obs.client.obs_client import ObsClient
 import gzip
 from cStringIO import StringIO
-import urlparse
 import xml.dom.minidom
 import xml.sax.saxutils
 import logging
@@ -39,10 +36,12 @@ SCHEME = """<scheme>
             <arg name="name">
                 <title>Instance Name</title>
                 <description>Provide a unique name for this Instance/Stanza. IE: Cloudtrace, VPCFlow</description>
+                <required_on_edit>true</required_on_edit>
             </arg>
-            <arg name="obsendpoint">
-                <title>OBSEndpoint</title>
-                <description>Endpoint of the Object Storage Service: IE: obs.eu-de.otc.t-systems.com .</description>
+            <arg name="idpname">
+                <title>IDPNAme</title>
+                <description>Enter the name of the IDP Definition used for authentication.</description>
+                <required_on_edit>true</required_on_edit>
             </arg>
              <arg name="bucketfolder">
                 <title>Bucket Folder</title>
@@ -51,59 +50,26 @@ SCHEME = """<scheme>
             <arg name="bucketname">
                 <title>Bucketname</title>
                 <description>Enter the name of the Bucket on OBS soring the log traces.</description>
+                <required_on_edit>true</required_on_edit>
             </arg>
-            <arg name="idpname">
-                <title>IDPNAme</title>
-                <description>Enter the name of the IDP Definition used for authentication.</description>
+             <arg name="logprefix">
+                <title>Log file name prefix</title>
+                <description>This should be the first letters of the log name: Case sensative.</description>
             </arg>
             <arg name="username">
                 <title>User Name</title>
                 <description>Azure AD or Other user accounts</description>
+                <required_on_edit>true</required_on_edit>
             </arg>
             <arg name="userpass">
                 <title>User password</title>
                 <description>Azure AD or Other user accounts password</description>
-            </arg>
-            <arg name="logprefix">
-                <title>Log file name prefix</title>
-                <description>This should be the first letters of the log name: Case sensative.</description>
-            </arg>
-            <arg name="maxkeys">
-                <title>Maxkeys</title>
-                <description>Maximum numbwer of objects (files) to pull in one cycle (100-1000).</description>
+                <required_on_edit>true</required_on_edit>
             </arg>
       </args>
     </endpoint>
 </scheme>
 """
-
-def http_request(IAMurl, method, header, body=None, request_verify=False, request_cert=None, proxies=None, cookies=None):
-    if body != None and type(body) != str:
-        body = str(body)
-
-    if header != None and type(header) != dict:
-        try:
-            header = json.loads(header)
-
-        except Exception, e:
-            print e
-    if header == None:
-        header = dict()
-
-    header.setdefault("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/53.0.2785.143 Safari/537.36")
-    resp = requests.request(method, IAMurl, data=body, headers=header, verify=request_verify, cert=request_cert, proxies=proxies, cookies=cookies, allow_redirects=False, timeout=600)
-    return resp
-
-def http_post(IAMurl, headers, data, verify=False, cert=None, proxies=None, cookies=None):
-
-    response = http_request(IAMurl, "post", headers, body=data, request_verify=verify, request_cert=cert, proxies=proxies, cookies=cookies)
-    return response
-
-def http_get(IAMurl, headers, verify=False, cert=None, proxies=None, cookies=None):
-    
-    response = http_request(IAMurl, "get", headers, request_verify=verify, request_cert=cert, proxies=proxies, cookies=cookies)
-    return response
-
 # Function to authenticate with Azure SSO and return authentication Token calling Powershell script
 def get_token(UserName, UserPass, IdpName):
 
@@ -162,8 +128,7 @@ def read_gz_file(buffer):
 
 # Connect to OBS and Query all the objects in the Bucket to be processed. 
 # Prefix and marker limit the search. Marker is a checkpoint of last run.
-def processlogs(obsClient, BucketName, Bucket_folder, prefix=None, marker=None, max_keys=None, source=None):
-
+def processlogs(obsClient, BucketName, Bucket_folder, CheckPoint, prefix=None, marker=None, max_keys=None, source=None):
     resp_list = obsClient.listObjects(BucketName, marker=marker, max_keys=max_keys, prefix=Bucket_folder)
     if resp_list.status < 300:
         if resp_list.body.contents:
@@ -192,6 +157,10 @@ def processlogs(obsClient, BucketName, Bucket_folder, prefix=None, marker=None, 
                             #Send formatted event data to sysout (Splunk Indexer)
                             send_event(json.dumps(Event_dict), Event_dict['time'], source) 
                         fini_stream()
+                        sys.stdout.flush()
+                        fo = open(CheckPoint, "w")
+                        fo.write(content.key)
+                        fo.close()
                     else:
                         logging.debug("ProcessLogs: Error Accessing file: "+content.key+" Errocode: %s" , resp_get.returncode)
                         sys.exit(2)
@@ -205,9 +174,6 @@ def processlogs(obsClient, BucketName, Bucket_folder, prefix=None, marker=None, 
         logging.debug("Processlogs: Error Accessing OBS Bucket " + BucketName + ",errorCode:%s", resp_list.status)
         logging.debug('ProcessLogs: Error Message:%s', resp_list.errorMessage)
         return None, None
-# prints XML error data to be consumed by Splunk
-def print_error(s):
-    print "<error><message>%s</message></error>" % xml.sax.saxutils.escape(s)
 
 def validate_conf(config, key):
     if key not in config:
@@ -254,14 +220,12 @@ def get_config(): # read XML configuration passed from splunkd
 
         # just some validation: make sure these keys are present (required)
         validate_conf(config, "name")
-        validate_conf(config, "obsendpoint")
+        validate_conf(config, "idpname")
         validate_conf(config, "bucketfolder")
         validate_conf(config, "bucketname")
-        validate_conf(config, "idpname")
+        validate_conf(config, "logprefix")
         validate_conf(config, "username")
         validate_conf(config, "userpass")
-        validate_conf(config, "logprefix")
-        validate_conf(config, "maxkeys")
         validate_conf(config, "checkpoint_dir")
     except Exception, e:
         raise Exception, "Error getting Splunk configuration via STDIN: %s" % str(e)
@@ -322,23 +286,34 @@ def run():
     VerifyCert=False
     LastMarker = None
     FinalMarker = None
+    Prefix = None
+    OBSEndpoint = "obs.eu-de.otc.t-systems.com"
+    MaxKeys = 1000
+
     # Read Parameters passed by Splunk Configuration
-    config = get_config()
-    Instance = config["name"]
-    OBSEndpoint = config["obsendpoint"]
-    BucketFolder = config["bucketfolder"]
-    BucketName = config["bucketname"]
-    IdpName = config["idpname"]
-    UserName = config["username"]
-    UserPass = config["userpass"]
-    MaxKeys = config["maxkeys"]
-    Prefix = config["logprefix"]
-    CheckPoint_dir = config["checkpoint_dir"]
+    # config = get_config()
+    # Instance = config["name"]
+    # IdpName = config["idpname"]
+    # BucketFolder = config["bucketfolder"]
+    # BucketName = config["bucketname"]
+    # Prefix = config["logprefix"]
+    # UserName = config["username"]
+    # UserPass = config["userpass"]
+    # CheckPoint_dir = config["checkpoint_dir"]
+
+    Instance = "obs_ta_idp//Cloudtrace"
+    IdpName = "IDP"
+    BucketFolder = "CloudTraces"
+    BucketName = "obs-robert"
+    Prefix = "CTS"
+    UserName = "Robert"
+    UserPass = "pass"
+    CheckPoint_dir = "C:/temp"
     
               
     # # Setup Checkpoint file name based on Instance name. We ae parsing the name passed by Splunk
     slist = Instance.split("//")
-    InstanceName = slist[0]
+    InstanceName = slist[1]
     CheckPoint = os.path.join(CheckPoint_dir, InstanceName +".checkpoint")
     
 
@@ -370,11 +345,8 @@ def run():
 
     while True:
         # Start Processing Logs using the listobjects function defined above. This may cycle multiple times of more than maxkey returned.
-        FinalMarker, FinalMarkerTag = processlogs(obsClient, BucketName, BucketFolder, prefix=Prefix, marker=LastMarker, max_keys=MaxKeys, source=InstanceName)
+        FinalMarker, FinalMarkerTag = processlogs(obsClient, BucketName, BucketFolder, CheckPoint, prefix=Prefix, marker=LastMarker, max_keys=MaxKeys, source=InstanceName)
         if FinalMarkerTag is None:
-            fo = open(CheckPoint, "w")
-            fo.write(FinalMarker)
-            fo.close()
             obsClient.close()
             break
         LastMarker = FinalMarker

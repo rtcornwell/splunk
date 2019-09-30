@@ -1,10 +1,9 @@
 [obs_ta_idp://default]
 
-obsendpoint = "obs.eu-de.otc.t-systems.com"
+idpname = <value>
 bucketfolder = <value>
 bucketname = <value>
-idpname = <value>
+logprefix = <value>
 username = <value>
 userpass = <value>
-logprefix = <value>
-maxkeys = 100
+
