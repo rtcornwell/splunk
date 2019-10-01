@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 # -*- coding:utf-8 -*-
 # Splunk Application to import Object Storage CTS Logs.
 # Written for EY using the EY Powershell Authentication script for Federated users.
@@ -7,13 +7,13 @@ import time
 import os
 from com.obs.client.obs_client import ObsClient
 import gzip
-from cStringIO import StringIO
+from io import StringIO
 import xml.dom.minidom
 import xml.sax.saxutils
 import logging
 import requests
+import re
 import json
-from __builtin__ import Exception
 import subprocess
 
 # set up logging suitable for splunkd consumption
@@ -74,8 +74,7 @@ SCHEME = """<scheme>
 def get_token(UserName, UserPass, IdpName):
 
     PowerShellPath = r'C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\powershell.exe'
-    # PowerShellCmd  = r'C:\\Program Files\\Splunk\\etc\\apps\\obs_ta_idp\\bin\\otc-get-token.ps1'
-    PowerShellCmd  = r'C:\\Users\\rtcor\\.vscode\\PythonProjects\\Splunk\\obs_ta_idp_ey\bin\\otc-get-token.ps1'
+    PowerShellCmd  = r'C:\\Program Files\\Splunk\\etc\\apps\\obs_ta_idp\\bin\\otc-get-token.ps1'
           
     p = subprocess.Popen([PowerShellPath,'-ExecutionPolicy','Bypass','-file',PowerShellCmd,UserName,UserPass,IdpName]
         ,stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -147,7 +146,8 @@ def processlogs(obsClient, BucketName, Bucket_folder, CheckPoint, prefix=None, m
                         # Each log may contain one or many events so we want to parse each event and process each individually.
                         for Event in Events:
                             # Test if JSON Object is returned (List) or a Json String. Convert string to list
-                            if isinstance(Event, unicode):
+                            print Event
+                            if isinstance(Event, str):
                                 Event_dict = json.loads(Event)
                             else:
                                 Event_dict = Event
@@ -177,7 +177,9 @@ def processlogs(obsClient, BucketName, Bucket_folder, CheckPoint, prefix=None, m
 
 def validate_conf(config, key):
     if key not in config:
-        raise Exception, "Invalid configuration received from Splunk: key '%s' is missing." % key
+        logging.debug("Invalid configuration received from Splunk: key %s is missing.", key)
+        sys.exit(1)
+        
 
 def get_config(): # read XML configuration passed from splunkd
     config = {}
@@ -216,8 +218,9 @@ def get_config(): # read XML configuration passed from splunkd
             config["checkpoint_dir"] = checkpnt_node.firstChild.data
 
         if not config:
-            raise Exception, "Invalid configuration received from Splunk."
-
+            logging.debug('Invalid configuration received from Splunk')
+            sys.exit(1)
+        
         # just some validation: make sure these keys are present (required)
         validate_conf(config, "name")
         validate_conf(config, "idpname")
@@ -227,13 +230,10 @@ def get_config(): # read XML configuration passed from splunkd
         validate_conf(config, "username")
         validate_conf(config, "userpass")
         validate_conf(config, "checkpoint_dir")
-    except Exception, e:
-        raise Exception, "Error getting Splunk configuration via STDIN: %s" % str(e)
-
     return config
 
 def do_scheme():
-    print SCHEME
+    print (SCHEME)
 
 def get_validation_data(): # Read Sysargs passed by the splunk process.
     val_data = {}
@@ -269,8 +269,8 @@ def validate_arguments():
 
 # Display Usage command format (For Debugging)
 def usage():
-    print "usage: %s [--scheme|--validate-arguments]"
-    sys.exit(2)
+    print ("usage: [--scheme|--validate-arguments]")
+    sys.exit(0)
 
 # Test Splunk streaming
 def test():
@@ -290,7 +290,7 @@ def run():
     OBSEndpoint = "obs.eu-de.otc.t-systems.com"
     MaxKeys = 1000
 
-    # Read Parameters passed by Splunk Configuration
+   # Read Parameters passed by Splunk Configuration
     # config = get_config()
     # Instance = config["name"]
     # IdpName = config["idpname"]
@@ -300,23 +300,21 @@ def run():
     # UserName = config["username"]
     # UserPass = config["userpass"]
     # CheckPoint_dir = config["checkpoint_dir"]
-
-    Instance = "obs_ta_idp//Cloudtrace"
-    IdpName = "IDP"
-    BucketFolder = "CloudTraces"
-    BucketName = "obs-robert"
-    Prefix = "CTS"
-    UserName = "Robert"
-    UserPass = "pass"
-    CheckPoint_dir = "C:/temp"
     
-              
+    Instance = "obs_ta_idp//VPCFLOW"
+    IdpName = "IDP"
+    BucketFolder = "LogTanks"
+    BucketName = "obs-vpcflow"
+    Prefix = "VPC"
+    UserName = "robert"
+    UserPass = "pass"
+    CheckPoint_dir = "c:/temp"
+
     # # Setup Checkpoint file name based on Instance name. We ae parsing the name passed by Splunk
     slist = Instance.split("//")
     InstanceName = slist[1]
     CheckPoint = os.path.join(CheckPoint_dir, InstanceName +".checkpoint")
     
-
     # Authenticate with IdP Initiated Federation and return Token (Powershell Script)
     TokenID = get_token(UserName, UserPass,IdpName)
 
