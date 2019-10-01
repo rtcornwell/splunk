@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python
 # -*- coding:utf-8 -*-
 # Splunk Application to import Object Storage CTS Logs.
 # Written for EY using the EY Powershell Authentication script for Federated users.
@@ -7,12 +7,12 @@ import time
 import os
 from com.obs.client.obs_client import ObsClient
 import gzip
+from io import BytesIO
 from io import StringIO
 import xml.dom.minidom
 import xml.sax.saxutils
 import logging
 import requests
-import re
 import json
 import subprocess
 
@@ -74,20 +74,25 @@ SCHEME = """<scheme>
 def get_token(UserName, UserPass, IdpName):
 
     PowerShellPath = r'C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\powershell.exe'
-    PowerShellCmd  = r'C:\\Program Files\\Splunk\\etc\\apps\\obs_ta_idp\\bin\\otc-get-token.ps1'
+    # PowerShellCmd  = r'C:\\Program Files\\Splunk\\etc\\apps\\obs_ta_idp\\bin\\otc-get-token.ps1'
+    PowerShellCmd  = r'C:\\Users\\rtcor\\.vscode\\PythonProjects\\Splunk\\obs_ta_idp_ey\\bin\\otc-get-token.ps1'
           
     p = subprocess.Popen([PowerShellPath,'-ExecutionPolicy','Bypass','-file',PowerShellCmd,UserName,UserPass,IdpName]
         ,stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     TokenID, err = p.communicate()
-    rc = p.returncode
-    if(err):
-        raise Exception('Error: ' + str(err))
-    return TokenID.strip()
-
+    if sys.version_info < (3,0):
+        TokenID = str(TokenID).strip()
+    else:
+        TokenID = str(TokenID,encoding='utf-8').strip()
+    if p.returncode != 0:
+        logging.debug("GetToken: Calling powershell script: error:%s", p.returncode)
+        sys.exit(1)
+    return TokenID
+    
 # Function to request temporary AK/SK and security key https://docs.otc.t-systems.com/en-us/api/iam/en-us_topic_0097949518.html
 def get_ak(TokenID,Proxies=None, Verify=False):
     url = "https://iam.eu-de.otc.t-systems.com/v3.0/OS-CREDENTIAL/securitytokens"
-    body = '{\"auth\":{\"identity\":{\"methods\": [\"token\"],\"token\":{\"id\": \"'+ TokenID.strip() +'\",\"duration-seconds\": \"900\"}}}}'
+    body = '{\"auth\":{\"identity\":{\"methods\": [\"token\"],\"token\":{\"id\": \"'+ TokenID +'\",\"duration-seconds\": \"900\"}}}}'
     Header = dict()
     Header.setdefault("Content-type", "application/json;charset=utf8")
     resp = requests.request('post', url, data=body, headers=Header, verify=Verify, cert=None, proxies=Proxies, cookies=None, allow_redirects=False, timeout=600)
@@ -121,57 +126,61 @@ def send_done_key(source):
 
 # get the data from the data flow
 def read_gz_file(buffer):
-    buf = StringIO(buffer)
-    f = gzip.GzipFile(mode='rb', fileobj=buf)
+    f = gzip.GzipFile(mode='rb', fileobj=BytesIO(buffer))
     return f.read()
 
-# Connect to OBS and Query all the objects in the Bucket to be processed. 
-# Prefix and marker limit the search. Marker is a checkpoint of last run.
+
 def processlogs(obsClient, BucketName, Bucket_folder, CheckPoint, prefix=None, marker=None, max_keys=None, source=None):
+    # Connect to OBS and Query all the objects in the Bucket to be processed. 
+    # Prefix and marker limit the search. Marker is a checkpoint of last run.
+    # Call the OBS Clinet to List all objects to process using marker  object as the start.
     resp_list = obsClient.listObjects(BucketName, marker=marker, max_keys=max_keys, prefix=Bucket_folder)
-    if resp_list.status < 300:
-        if resp_list.body.contents:
-            for content in resp_list.body.contents:
-                objectList = content.key.split('/')
-                objectKey = objectList[len(objectList)-1]
-                #Only process Logs that match the prefix passed and is a log file.
-                if content.key.endswith('.gz') and objectKey.startswith(prefix):
-                    resp_get = obsClient.getObject(BucketName,content.key, loadStreamInMemory=True)
-                    if resp_get.status < 300 :
-                        init_stream()
-                        StreamData = read_gz_file(resp_get.body.buffer)
-                        Events = json.loads(StreamData)
-                        # Parse individual events from json Data (trace events) and send event to splunk indexer.
-                        # https://docs.otc.t-systems.com/en-us/usermanual/cts/en-us_topic_0030598500.html
-                        # Each log may contain one or many events so we want to parse each event and process each individually.
-                        for Event in Events:
-                            # Test if JSON Object is returned (List) or a Json String. Convert string to list
-                            print Event
-                            if isinstance(Event, str):
-                                Event_dict = json.loads(Event)
-                            else:
-                                Event_dict = Event
-                            # Convert timestamp in event from millisecond posix to seconds possix
-                            Event_dict['time'] = int(round(Event_dict['time'] / 1000))
-                            if 'record_time' in Event_dict: Event_dict['record_time'] = int(round(Event_dict['record_time'] / 1000))
-                            #Send formatted event data to sysout (Splunk Indexer)
-                            send_event(json.dumps(Event_dict), Event_dict['time'], source) 
-                        fini_stream()
-                        sys.stdout.flush()
-                        fo = open(CheckPoint, "w")
-                        fo.write(content.key)
-                        fo.close()
-                    else:
-                        logging.debug("ProcessLogs: Error Accessing file: "+content.key+" Errocode: %s" , resp_get.returncode)
-                        sys.exit(2)
+    if resp_list.status == 200 and resp_list.body.contents:    
+        for content in resp_list.body.contents:
+            objectList = content.key.split('/')
+            objectKey = objectList[len(objectList)-1]
+            #Only process Logs that match the prefix passed and is a log file.
+            if content.key.endswith('.gz') and objectKey.startswith(prefix):
+                resp_get = obsClient.getObject(BucketName,content.key, loadStreamInMemory=True)
+                if resp_get.status == 200 :
+                    init_stream()
+                    Events = json.loads(read_gz_file(resp_get.body.buffer))
+                    # Parse individual events from json Data (trace events) and send event to splunk indexer.
+                    # https://docs.otc.t-systems.com/en-us/usermanual/cts/en-us_topic_0030598500.html
+                    # Each log may contain one or many events so we want to parse each event and process each individually.
+                    for Event in Events:
+                        # Test if JSON Object is returned (List) or a Json String. Convert string to list
+                        if isinstance(Event, str):
+                            Event = json.loads(Event)
+                        if "message" in Event: #test if this is a VPC message, if so format message to json
+                            msg = Event["message"].split()
+                            Event["message"] = json.loads('{"version":'+msg[0]+',"project_id":"'+msg[1]+'",' \
+                                '"interface_id":"'+msg[2]+'","srcaddr":"'+msg[3]+'",' \
+                                '"dstaddr":"'+msg[4]+'","srcport":'+msg[5]+',' \
+                                '"dstport":'+msg[6]+',"protocol":'+msg[7]+',' \
+                                '"packets":'+msg[8]+',"bytes":'+msg[9]+',' \
+                                '"start":'+msg[10]+',"end":'+msg[11]+','\
+                                '"action":"'+msg[12]+'","log_status":"'+msg[13]+'"}')
+
+                        # Convert timestamp in event from millisecond posix to seconds possix
+                        Event['time'] = int(round(Event['time'] / 1000))
+                        if 'record_time' in Event: Event['record_time'] = int(round(Event['record_time'] / 1000))
+                        #Send formatted event data to sysout (Splunk Indexer)
+                        send_event(json.dumps(Event), Event['time'], source) 
+                    fini_stream()
+                    sys.stdout.flush()
+                    fo = open(CheckPoint, "w")
+                    fo.write(content.key)
+                    fo.close()
                 else:
-                    logging.info("ProcessLogs: Skipping File that is not a matching Log File: %s" , content.key)
-                 
-            return content.key, resp_list.body.next_marker
-        else:
-            return marker, None
+                    logging.debug("ProcessLogs: Error Accessing object: "+content.key+" Errocode: %s" , resp_get.returncode)
+                    sys.exit(1)
+            else:
+                logging.info("ProcessLogs: Skipping File that is not a matching Log File: %s" , content.key)
+                
+        return content.key, resp_list.body.next_marker
     else:
-        logging.debug("Processlogs: Error Accessing OBS Bucket " + BucketName + ",errorCode:%s", resp_list.status)
+        logging.debug("Processlogs: Accessing OBS Bucket or no logs returned " + BucketName + ",errorCode:%s", resp_list.status)
         logging.debug('ProcessLogs: Error Message:%s', resp_list.errorMessage)
         return None, None
 
@@ -183,53 +192,51 @@ def validate_conf(config, key):
 
 def get_config(): # read XML configuration passed from splunkd
     config = {}
+    # read everything from stdin passed by Splunk
+    config_str = sys.stdin.read()
 
-    try:
-        # read everything from stdin passed by Splunk
-        config_str = sys.stdin.read()
+    # parse the config XML
+    doc = xml.dom.minidom.parseString(config_str)
+    root = doc.documentElement
+    conf_node = root.getElementsByTagName("configuration")[0]
+    if conf_node:
+        logging.debug("XML: found configuration")
+        stanza = conf_node.getElementsByTagName("stanza")[0]
+        if stanza:
+            stanza_name = stanza.getAttribute("name")
+            if stanza_name:
+                logging.debug("XML: found stanza " + stanza_name)
+                config["name"] = stanza_name
 
-        # parse the config XML
-        doc = xml.dom.minidom.parseString(config_str)
-        root = doc.documentElement
-        conf_node = root.getElementsByTagName("configuration")[0]
-        if conf_node:
-            logging.debug("XML: found configuration")
-            stanza = conf_node.getElementsByTagName("stanza")[0]
-            if stanza:
-                stanza_name = stanza.getAttribute("name")
-                if stanza_name:
-                    logging.debug("XML: found stanza " + stanza_name)
-                    config["name"] = stanza_name
+                params = stanza.getElementsByTagName("param")
+                for param in params:
+                    param_name = param.getAttribute("name")
+                    logging.debug("XML: found param '%s'" % param_name)
+                    if param_name and param.firstChild and \
+                        param.firstChild.nodeType == param.firstChild.TEXT_NODE:
+                        data = param.firstChild.data
+                        config[param_name] = data
+                        logging.debug("XML: '%s' -> '%s'" %
+                                        (param_name, data))
 
-                    params = stanza.getElementsByTagName("param")
-                    for param in params:
-                        param_name = param.getAttribute("name")
-                        logging.debug("XML: found param '%s'" % param_name)
-                        if param_name and param.firstChild and \
-                           param.firstChild.nodeType == param.firstChild.TEXT_NODE:
-                            data = param.firstChild.data
-                            config[param_name] = data
-                            logging.debug("XML: '%s' -> '%s'" %
-                                          (param_name, data))
+    checkpnt_node = root.getElementsByTagName("checkpoint_dir")[0]
+    if checkpnt_node and checkpnt_node.firstChild and \
+        checkpnt_node.firstChild.nodeType == checkpnt_node.firstChild.TEXT_NODE:
+        config["checkpoint_dir"] = checkpnt_node.firstChild.data
 
-        checkpnt_node = root.getElementsByTagName("checkpoint_dir")[0]
-        if checkpnt_node and checkpnt_node.firstChild and \
-           checkpnt_node.firstChild.nodeType == checkpnt_node.firstChild.TEXT_NODE:
-            config["checkpoint_dir"] = checkpnt_node.firstChild.data
-
-        if not config:
-            logging.debug('Invalid configuration received from Splunk')
-            sys.exit(1)
-        
-        # just some validation: make sure these keys are present (required)
-        validate_conf(config, "name")
-        validate_conf(config, "idpname")
-        validate_conf(config, "bucketfolder")
-        validate_conf(config, "bucketname")
-        validate_conf(config, "logprefix")
-        validate_conf(config, "username")
-        validate_conf(config, "userpass")
-        validate_conf(config, "checkpoint_dir")
+    if not config:
+        logging.debug('Invalid configuration received from Splunk')
+        sys.exit(1)
+    
+    # just some validation: make sure these keys are present (required)
+    validate_conf(config, "name")
+    validate_conf(config, "idpname")
+    validate_conf(config, "bucketfolder")
+    validate_conf(config, "bucketname")
+    validate_conf(config, "logprefix")
+    validate_conf(config, "username")
+    validate_conf(config, "userpass")
+    validate_conf(config, "checkpoint_dir")
     return config
 
 def do_scheme():
